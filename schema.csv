@@ -1,4 +1,4 @@
-db_table,db_field_name,df_type
+db_table_name,db_field_name,df_type
 test_table,id,int64
 test_table,count,int64
 test_table,price,float64

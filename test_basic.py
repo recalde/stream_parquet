@@ -13,24 +13,41 @@ from pathlib import Path
 import pytest
 from boto3.dynamodb.types import TypeSerializer, TypeDeserializer
 
-def _sample_for(typ: str) -> Any:
-    """Return a sample Python value for a simple type token from schema.csv."""
-    if typ == "string":
-        return "hello-world"
-    if typ == "number":
-        # use Decimal to avoid float precision surprises
+def _sample_for(df_type: str) -> Any:
+    """Return a sample Python value for a df_type token from schema.csv."""
+    if df_type == "int64":
+        # use Decimal to match DynamoDB number behavior
         return Decimal("42")
-    if typ == "boolean":
+    if df_type == "float64":
+        return Decimal("3.14")
+    if df_type == "bool":
         return True
-    if typ == "list":
+    if df_type == "datetime64[ns]":
+        # serializer accepts strings; maintain an ISO-like timestamp
+        return "2023-01-02T03:04:05Z"
+    if df_type == "object":
+        return "hello-world"
+    if df_type == "list":
         return ["a", Decimal("1")]
-    if typ == "map":
+    if df_type == "dict":
         return {"x": "y", "n": Decimal("7")}
-    if typ == "binary":
-        return b"\x00\x01"
-    if typ == "null":
+    if df_type == "bytes":
+        return b"\x00\x01\x02"
+    if df_type == "null":
         return None
-    # default fallback
+    # legacy tokens fallback
+    if df_type == "string":
+        return "hello-world"
+    if df_type == "number":
+        return Decimal("42")
+    if df_type == "boolean":
+        return True
+    if df_type == "list":
+        return ["a", Decimal("1")]
+    if df_type == "map":
+        return {"x": "y", "n": Decimal("7")}
+    if df_type == "binary":
+        return b"\x00\x01"
     return "unknown"
 
 
@@ -40,12 +57,16 @@ def test_schema_roundtrip():
     schema_path = os.path.join(base, "schema.csv")
     assert os.path.exists(schema_path), f"schema.csv not found at {schema_path}"
 
-    # read schema rows (expect header: name,type)
+    # read schema rows (expect header: db_table_name, db_field_name, df_type)
     schema = []
     with open(schema_path, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
-            schema.append({"name": row["name"].strip(), "type": row["type"].strip()})
+            # handle either header variants safely
+            db_table_name = row.get("db_table_name") or ""
+            db_field = row.get("db_field_name") or row.get("name") or ""
+            df_type = row.get("df_type") or row.get("type") or ""
+            schema.append({"db_table_name": db_table_name.strip(), "db_field_name": db_field.strip(), "df_type": df_type.strip()})
 
     serializer = TypeSerializer()
     deserializer = TypeDeserializer()
@@ -53,7 +74,9 @@ def test_schema_roundtrip():
     # build a test item and validate roundtrip per field
     item: Dict[str, Any] = {}
     for col in schema:
-        item[col["name"]] = _sample_for(col["type"])
+        if not col["db_field_name"]:
+            continue
+        item[col["db_field_name"]] = _sample_for(col["df_type"])
 
     # For each field, serialize then deserialize and compare values
     for k, v in item.items():
@@ -116,7 +139,7 @@ def test_simple(monkeypatch, tmp_path):
         reader = csv.DictReader(fh)
         for row in reader:
             schema.append({
-                "db_table": row["db_table"].strip(),
+                "db_table_name": row["db_table_name"].strip(),
                 "db_field_name": row["db_field_name"].strip(),
                 "df_type": row["df_type"].strip(),
             })
@@ -127,7 +150,7 @@ def test_simple(monkeypatch, tmp_path):
         item[col["db_field_name"]] = _sample_for(col["df_type"])
 
     # Build fake stream event (one record per item)
-    event = _build_stream_event_for_table(schema[0]["db_table"], [item])
+    event = _build_stream_event_for_table(schema[0]["db_table_name"], [item])
 
     # Monkeypatch awswrangler.s3.to_parquet to write locally under ./output/
     import awswrangler as wr

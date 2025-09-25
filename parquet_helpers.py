@@ -10,6 +10,9 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pyarrow as pa
 from boto3.dynamodb.types import TypeDeserializer
+import json
+import base64
+from decimal import Decimal
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -84,10 +87,32 @@ def deserialize_stream_new_image(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ----- Schema & typing helpers -----
+def _normalize_for_json(obj):
+    """Recursively convert values to JSON-safe types:
+    - Decimal -> str (preserve exactness)
+    - bytes -> base64 string
+    - dict/list -> recurse
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, Decimal):
+        return str(obj)
+    if isinstance(obj, (int, float, str, bool)):
+        return obj
+    if isinstance(obj, (bytes, bytearray)):
+        return base64.b64encode(bytes(obj)).decode("ascii")
+    if isinstance(obj, dict):
+        return {str(k): _normalize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_normalize_for_json(v) for v in obj]
+    # fallback to string
+    return str(obj)
+
+
 def _arrow_type_for(df_type: str) -> pa.DataType:
     """Map df_type string to a PyArrow type."""
     f = (df_type or "").strip().lower()
-    if f in ("string", "str", "varchar", "text"):
+    if f in ("string", "str", "varchar", "text", "object"):
         return pa.string()
     if f in ("int64", "bigint"):
         return pa.int64()
@@ -97,7 +122,7 @@ def _arrow_type_for(df_type: str) -> pa.DataType:
         return pa.float64()
     if f in ("bool", "boolean"):
         return pa.bool_()
-    if f in ("timestamp", "datetime"):
+    if f in ("timestamp", "datetime", "datetime64[ns]"):
         return pa.timestamp("ns", tz="UTC")  # store UTC; partition path is local time
     if f == "date":
         return pa.date32()
@@ -105,6 +130,13 @@ def _arrow_type_for(df_type: str) -> pa.DataType:
         prec = int(os.environ.get("DECIMAL_PRECISION", "38"))
         scale = int(os.environ.get("DECIMAL_SCALE", "10"))
         return pa.decimal128(prec, scale)
+    if f in ("bytes", "binary", "blob"):
+        return pa.binary()
+    if f in ("list", "dict", "map", "json"):
+        # We'll serialize these to JSON strings for Arrow
+        return pa.string()
+    if f in ("null",):
+        return pa.null()
     return pa.string()
 
 
@@ -135,10 +167,28 @@ def coerce_dataframe_types_with_schema(df: pd.DataFrame, table_schema: pd.DataFr
                 df[col] = pd.to_numeric(df[col], errors="coerce")
             elif df_type in ("bool", "boolean"):
                 df[col] = df[col].astype("boolean")
-            elif df_type in ("timestamp", "datetime"):
+            elif df_type in ("timestamp", "datetime", "datetime64[ns]"):
                 df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
             elif df_type == "date":
                 df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+            elif df_type in ("list", "dict", "map", "object", "json"):
+                # Serialize nested structures to JSON strings after normalizing Decimals/bytes
+                def _to_json_safe(v):
+                    if pd.isna(v):
+                        return None
+                    return json.dumps(_normalize_for_json(v), ensure_ascii=False)
+                df[col] = df[col].apply(_to_json_safe)
+            elif df_type in ("bytes", "binary", "blob"):
+                # Ensure bytes-like objects (keep existing bytes, encode strings)
+                def _ensure_bytes(v):
+                    if pd.isna(v):
+                        return None
+                    if isinstance(v, (bytes, bytearray)):
+                        return bytes(v)
+                    if isinstance(v, str):
+                        return v.encode("utf-8")
+                    return v
+                df[col] = df[col].apply(_ensure_bytes)
             # decimal: Arrow enforces on write
         except Exception as ex:
             logger.warning("⚠️ %s | coercion_warn table=%s col=%s err=%s", LOG_TAG, table_name, col, ex)

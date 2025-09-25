@@ -7,3 +7,9 @@ awslambdaric>=2.0.0
 aws-lambda-powertools>=2.8.0
 pytest>=7.0,<8
 pytest-mock>=3.10
+
+# Provide tz database on platforms that lack a system tzdata (Windows, slim containers)
+tzdata>=2023.3
+
+# For Python < 3.9, provide backports.zoneinfo (no-op on 3.9+)
+backports.zoneinfo>=0.2; python_version < "3.9"
