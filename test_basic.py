@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 from boto3.dynamodb.types import TypeSerializer, TypeDeserializer
 
-
 def _sample_for(typ: str) -> Any:
     """Return a sample Python value for a simple type token from schema.csv."""
     if typ == "string":

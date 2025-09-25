@@ -1,0 +1,21 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Pytest: test_basic.py",
+			"type": "python",
+			"request": "launch",
+			"module": "pytest",
+			"args": [
+				"-q",
+				"${workspaceFolder}/test_basic.py"
+			],
+			"cwd": "${workspaceFolder}",
+			"console": "integratedTerminal",
+			"justMyCode": false,
+			"env": {
+				"PYTHONPATH": "${workspaceFolder}"
+			}
+		}
+	]
+}
