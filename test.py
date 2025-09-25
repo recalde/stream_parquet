@@ -61,6 +61,68 @@ def main():
 
     ddb = boto3.client("dynamodb", region_name=region)
 
+    # Local-output stubbing: if LOCAL_OUTPUT is "1" (default) we stub awswrangler -> write to local ./output/
+    if os.environ.get("LOCAL_OUTPUT", "1") == "1":
+        from pathlib import Path
+        import awswrangler as wr
+        import pandas as pd
+
+        base_dir = Path(__file__).parent
+        output_dir = Path(os.environ.get("LOCAL_OUTPUT_DIR", str(base_dir / "output")))
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        def _stub_to_parquet(df: pd.DataFrame, path: str, dtype=None, index=False, dataset=False, compression=None, **kwargs):
+            """
+            Convert s3://bucket/key... into a local path under output_dir/<key> and write a parquet file.
+            Returns the local path string (mimicking wr.s3.to_parquet).
+            """
+            bucket = os.environ.get("BUCKET_NAME", "")
+            if path.startswith(f"s3://{bucket}/"):
+                key = path.split(f"s3://{bucket}/", 1)[1]
+            elif path.startswith("s3://"):
+                key = path.split("s3://", 1)[1]
+            else:
+                key = path
+
+            local_path = output_dir / key
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                # prefer parquet; if pyarrow/fastparquet not available, fall back to feather
+                df.to_parquet(local_path, index=index)
+            except Exception:
+                local_path = local_path.with_suffix(".feather")
+                df.reset_index(drop=True).to_feather(local_path)
+            # Return a path-like string similar to awswrangler (we return local path)
+            return str(local_path)
+
+        # Patch the awswrangler to_parquet used by lambda_handler
+        try:
+            wr.s3.to_parquet = _stub_to_parquet
+        except Exception:
+            # best-effort patch; if wr module shape differs, ignore to avoid breaking real runs
+            pass
+
+        # Patch boto3.client to return a stub S3 client for head_object requests
+        real_boto3_client = boto3.client
+
+        class _StubS3Client:
+            def head_object(self, Bucket, Key):
+                # Map s3 Key to local output path
+                local_candidate = output_dir / Key
+                if not local_candidate.exists():
+                    # attempt to find any file under output_dir as a fallback
+                    found = next(output_dir.rglob("*"), None)
+                    local_candidate = found if found and found.exists() else None
+                size = local_candidate.stat().st_size if local_candidate and local_candidate.exists() else 0
+                return {"ContentLength": int(size)}
+
+        def _client(name, *args, **kwargs):
+            if name == "s3":
+                return _StubS3Client()
+            return real_boto3_client(name, *args, **kwargs)
+
+        boto3.client = _client
+
     # List tables with prefix
     table_names = []
     paginator = ddb.get_paginator("list_tables")
