@@ -1,0 +1,11 @@
+db_table,db_field_name,df_type
+test_table,id,int64
+test_table,count,int64
+test_table,price,float64
+test_table,active,bool
+test_table,created_at,datetime64[ns]
+test_table,name,object
+test_table,tags,list
+test_table,attrs,dict
+test_table,blob,bytes
+test_table,nullable,null
